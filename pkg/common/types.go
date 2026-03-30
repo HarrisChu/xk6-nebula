@@ -26,6 +26,7 @@ type (
 	IGraphClient interface {
 		IClient
 		GetData() (Data, error)
+		GetFileData(sourceFile string) (Data, error)
 		Execute(stmt string) (IGraphResponse, error)
 	}
 
@@ -46,8 +47,15 @@ type (
 		SetOption(*GraphOption) error
 	}
 
+	CsvReaderConfig struct {
+		Delimiter  string
+		WithHeader bool
+		Limit      int
+	}
+
 	ICsvReader interface {
-		ReadForever(dataCh chan<- Data) error
+		GetData(sourceFile string) (Data, error)
+		Close() error
 	}
 
 	GraphOption struct {

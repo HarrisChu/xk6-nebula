@@ -19,7 +19,6 @@ type (
 	// GraphPool nebula connection pool
 	GraphPool struct {
 		mutex             sync.Mutex
-		DataCh            chan common.Data
 		OutputCh          chan []string
 		Version           string
 		csvStrategy       csvReaderStrategy
@@ -44,11 +43,9 @@ type (
 	graphClientGetter  func(endpoint, username, password string, timeout time.Duration) (types.Client, error)
 	GraphClientFactory struct{}
 
-	// GraphClient a wrapper for nebula client, could read data from DataCh
 	GraphClient struct {
 		Session  types.Client
 		Pool     *GraphPool
-		DataCh   chan common.Data
 		username string
 		password string
 		since    time.Time
@@ -157,14 +154,12 @@ func (gp *GraphPool) Init() (common.IGraphClientPool, error) {
 	if gp.graphOption.CsvPath != "" {
 		gp.csvReader = common.NewCsvReader(
 			gp.graphOption.CsvPath,
-			gp.graphOption.CsvDelimiter,
-			gp.graphOption.CsvWithHeader,
-			gp.graphOption.CsvDataLimit,
+			common.CsvReaderConfig{
+				Delimiter:  gp.graphOption.CsvDelimiter,
+				WithHeader: gp.graphOption.CsvWithHeader,
+				Limit:      gp.graphOption.CsvDataLimit,
+			},
 		)
-		gp.DataCh = make(chan common.Data, gp.graphOption.CsvChannelSize)
-		if err := gp.csvReader.ReadForever(gp.DataCh); err != nil {
-			return nil, err
-		}
 	}
 
 	options := []nebula.PoolOptionsFn{
@@ -230,7 +225,6 @@ func (gp *GraphPool) validate(address string) error {
 	return nil
 }
 
-// Close closes the nebula pool
 func (gp *GraphPool) Close() error {
 	gp.mutex.Lock()
 	defer gp.mutex.Unlock()
@@ -238,6 +232,9 @@ func (gp *GraphPool) Close() error {
 		client.Close()
 	}
 	gp.pool.Close()
+	if gp.csvReader != nil {
+		gp.csvReader.Close()
+	}
 	return nil
 }
 
@@ -249,7 +246,7 @@ func (gp *GraphPool) GetSession() (common.IGraphClient, error) {
 		return nil, fmt.Errorf("GraphPool is not initialized, please call Init() first")
 	}
 
-	s := &GraphClient{Pool: gp, DataCh: gp.DataCh, since: time.Now()}
+	s := &GraphClient{Pool: gp, since: time.Now()}
 	gp.clients = append(gp.clients, s)
 	return s, nil
 }
@@ -282,14 +279,18 @@ func (gc *GraphClient) Close() error {
 	return nil
 }
 
-// GetData get data from csv reader
 func (gc *GraphClient) GetData() (common.Data, error) {
-	if gc.DataCh != nil && len(gc.DataCh) != 0 {
-		if d, ok := <-gc.DataCh; ok {
-			return d, nil
-		}
+	if gc.Pool.csvReader != nil {
+		return gc.Pool.csvReader.GetData("")
 	}
-	return nil, fmt.Errorf("no Data at all")
+	return nil, fmt.Errorf("csv reader not initialized")
+}
+
+func (gc *GraphClient) GetFileData(sourceFile string) (common.Data, error) {
+	if gc.Pool.csvReader != nil {
+		return gc.Pool.csvReader.GetData(sourceFile)
+	}
+	return nil, fmt.Errorf("csv reader not initialized")
 }
 
 // Execute executes nebula query

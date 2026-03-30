@@ -20,7 +20,6 @@ const EnvRetryTimeoutUs = "NEBULA_RETRY_TIMEOUT_US"
 type (
 	// GraphPool nebula connection pool
 	GraphPool struct {
-		DataCh      chan common.Data
 		OutputCh    chan []string
 		initialized bool
 		closed      bool
@@ -37,7 +36,6 @@ type (
 	GraphClient struct {
 		Client *graph.Session
 		Pool   *GraphPool
-		DataCh chan common.Data
 		logger logger
 	}
 
@@ -46,8 +44,6 @@ type (
 		*graph.ResultSet
 		ResponseTime int32
 	}
-
-	csvReaderStrategy int
 
 	output struct {
 		timeStamp    int64
@@ -71,13 +67,6 @@ type (
 
 var _ common.IGraphClient = &GraphClient{}
 var _ common.IGraphClientPool = &GraphPool{}
-
-const (
-	// AllInOne read csv sequentially
-	AllInOne csvReaderStrategy = iota
-	// Separate read csv concurrently
-	Separate
-)
 
 func formatOutput(o *output) []string {
 	return []string{
@@ -146,14 +135,12 @@ func (gp *GraphPool) Init() (common.IGraphClientPool, error) {
 	if gp.graphOption.CsvPath != "" {
 		gp.csvReader = common.NewCsvReader(
 			gp.graphOption.CsvPath,
-			gp.graphOption.CsvDelimiter,
-			gp.graphOption.CsvWithHeader,
-			gp.graphOption.CsvDataLimit,
+			common.CsvReaderConfig{
+				Delimiter:  gp.graphOption.CsvDelimiter,
+				WithHeader: gp.graphOption.CsvWithHeader,
+				Limit:      gp.graphOption.CsvDataLimit,
+			},
 		)
-		gp.DataCh = make(chan common.Data, gp.graphOption.CsvChannelSize)
-		if err := gp.csvReader.ReadForever(gp.DataCh); err != nil {
-			return nil, err
-		}
 	}
 	return gp, nil
 }
@@ -258,11 +245,6 @@ func (gp *GraphPool) validate(address string) ([]graph.HostAddress, error) {
 	return hosts, nil
 }
 
-// Deprecated ConfigCsvStrategy sets csv reader strategy
-func (gp *GraphPool) ConfigCsvStrategy(strategy int) {
-	return
-}
-
 // Close closes the nebula pool
 func (gp *GraphPool) Close() error {
 	gp.mutex.Lock()
@@ -280,6 +262,9 @@ func (gp *GraphPool) Close() error {
 	}
 	if gp.sessPool != nil {
 		gp.sessPool.Close()
+	}
+	if gp.csvReader != nil {
+		gp.csvReader.Close()
 	}
 	gp.closed = true
 
@@ -302,11 +287,11 @@ func (gp *GraphPool) GetSession() (common.IGraphClient, error) {
 		if err != nil {
 			return nil, err
 		}
-		s := &GraphClient{Client: c, Pool: gp, DataCh: gp.DataCh, logger: gp.logger}
+		s := &GraphClient{Client: c, Pool: gp, logger: gp.logger}
 		gp.clients = append(gp.clients, s)
 		return s, nil
 	} else {
-		s := &GraphClient{Client: nil, Pool: gp, DataCh: gp.DataCh, logger: gp.logger}
+		s := &GraphClient{Client: nil, Pool: gp, logger: gp.logger}
 		return s, nil
 	}
 
@@ -335,14 +320,18 @@ func (gc *GraphClient) Close() error {
 	return nil
 }
 
-// GetData get data from csv reader
 func (gc *GraphClient) GetData() (common.Data, error) {
-	if gc.DataCh != nil && len(gc.DataCh) != 0 {
-		if d, ok := <-gc.DataCh; ok {
-			return d, nil
-		}
+	if gc.Pool.csvReader != nil {
+		return gc.Pool.csvReader.GetData("")
 	}
-	return nil, fmt.Errorf("no Data at all")
+	return nil, fmt.Errorf("csv reader not initialized")
+}
+
+func (gc *GraphClient) GetFileData(sourceFile string) (common.Data, error) {
+	if gc.Pool.csvReader != nil {
+		return gc.Pool.csvReader.GetData(sourceFile)
+	}
+	return nil, fmt.Errorf("csv reader not initialized")
 }
 
 func (gc *GraphClient) executeRetry(stmt string) (*graph.ResultSet, error) {
